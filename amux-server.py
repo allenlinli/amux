@@ -22084,10 +22084,14 @@ class CCHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
 
+    _MAX_BODY_SIZE = 10 * 1024 * 1024  # 10 MB
+
     def _read_body(self) -> dict:
         length = int(self.headers.get("Content-Length", 0))
         if length == 0:
             return {}
+        if length > self._MAX_BODY_SIZE:
+            raise ValueError(f"request body too large ({length} bytes, max {self._MAX_BODY_SIZE})")
         return json.loads(self.rfile.read(length))
 
     def _route(self, method: str):
