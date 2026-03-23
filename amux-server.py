@@ -39,6 +39,11 @@ for _old_home in [Path.home() / ".cmux", Path.home() / ".cc"]:
 # saved via the Settings UI) take priority over Docker-injected defaults.
 _server_env_file = _amux_home / "server.env"
 if _server_env_file.exists():
+    # Ensure restrictive permissions on file containing API keys
+    try:
+        os.chmod(str(_server_env_file), 0o600)
+    except OSError:
+        pass
     for _line in _server_env_file.read_text().splitlines():
         _line = _line.strip()
         if _line and not _line.startswith("#") and "=" in _line:
@@ -24200,6 +24205,7 @@ end tell
                         lines.append(f"{key}={val}")
                     os.environ[key] = val  # live effect
                 _server_env_file.write_text("\n".join(lines) + "\n")
+                os.chmod(str(_server_env_file), 0o600)
                 if "ANTHROPIC_API_KEY" in updates:
                     _init_claude_config()
                     # Push updated key into all running tmux sessions
