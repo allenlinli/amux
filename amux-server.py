@@ -174,7 +174,8 @@ def slog(*args):
 
 # ── Torrent (aria2c RPC) helpers ──────────────────────────────────────────────
 _ARIA2_RPC_PORT = 6800
-_ARIA2_RPC_SECRET = "amux"
+import secrets as _secrets_mod
+_ARIA2_RPC_SECRET = _secrets_mod.token_urlsafe(16)
 _ARIA2_DOWNLOAD_DIR = str(Path.home() / "Downloads" / "amux-torrents")
 _aria2_proc = None
 
