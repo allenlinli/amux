@@ -15984,6 +15984,9 @@ function renderMarkdown(raw) {
     try {
       let html = marked.parse(raw, { gfm: true, breaks: false });
       html = html.replace(/<table>/g, '<div class="table-scroll"><table>').replace(/<\/table>/g, '</table></div>');
+      if (typeof DOMPurify !== 'undefined') {
+        html = DOMPurify.sanitize(html, { ADD_ATTR: ['target'] });
+      }
       return html;
     } catch(e) { /* fall through to basic renderer */ }
   }
@@ -21483,6 +21486,7 @@ async function _gmailSubmitCode(account) {
 
 <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.6/Sortable.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/quill@2.0.3/dist/quill.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/quilljs-markdown@latest/dist/quilljs-markdown.js"></script>
