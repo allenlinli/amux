@@ -87,6 +87,51 @@ _PUBLIC_PATHS = frozenset({"/", "/manifest.json", "/sw.js", "/icon.svg", "/icon.
                            "/icon-192.png", "/icon-512.png", "/ca", "/release-notes",
                            "/api/release-notes"})
 _PUBLIC_PREFIXES = ("/s/", "/api/share/", "/invite/")
+
+# ── Filesystem access control ────────────────────────────────────────────────
+# Sensitive paths that must never be served via file APIs
+_SENSITIVE_PATHS = {".ssh", ".gnupg", ".aws", ".kube", ".netrc", ".npmrc",
+                    ".docker", ".config/gcloud", ".config/gh"}
+
+# System paths blocked regardless of location
+_BLOCKED_SYSTEM_PATHS = frozenset({
+    "/etc/shadow", "/etc/sudoers", "/etc/master.passwd",
+    "/private/etc/shadow", "/private/etc/sudoers",
+    "/var/db/sudo", "/private/var/db/sudo",
+})
+_BLOCKED_SYSTEM_PREFIXES = (
+    "/etc/ssh/", "/private/etc/ssh/",
+    "/var/run/secrets/", "/run/secrets/",
+)
+
+def _is_path_allowed(p: Path) -> bool:
+    """Check if a resolved path is safe to access via file APIs.
+    Blocks access to sensitive dotfile directories and system paths."""
+    try:
+        resolved = p.resolve()
+    except (OSError, ValueError):
+        return False
+    resolved_str = str(resolved)
+    # Block known sensitive system files
+    if resolved_str in _BLOCKED_SYSTEM_PATHS:
+        return False
+    if any(resolved_str.startswith(pfx) for pfx in _BLOCKED_SYSTEM_PREFIXES):
+        return False
+    # Block reading the auth token file itself
+    if resolved == _AUTH_TOKEN_FILE.resolve():
+        return False
+    # Check home-relative sensitive paths
+    home = Path.home().resolve()
+    try:
+        rel = resolved.relative_to(home)
+        parts = rel.parts
+        for sensitive in _SENSITIVE_PATHS:
+            sens_parts = Path(sensitive).parts
+            if parts[:len(sens_parts)] == sens_parts:
+                return False
+    except ValueError:
+        pass  # outside home — allow (e.g. /tmp, project dirs)
+    return True
 CC_LOGS.mkdir(parents=True, exist_ok=True)
 CC_MEMORY.mkdir(parents=True, exist_ok=True)
 CC_BOARD_DIR.mkdir(parents=True, exist_ok=True)
@@ -21741,6 +21786,8 @@ class CCHandler(BaseHTTPRequestHandler):
                 return self._json({"error": "uri or file required"}, 400)
             try:
                 if torrent_path and os.path.isfile(torrent_path):
+                    if not _is_path_allowed(Path(torrent_path)):
+                        return self._json({"error": "access denied"}, 403)
                     import base64
                     with open(torrent_path, "rb") as tf:
                         b64 = base64.b64encode(tf.read()).decode()
@@ -22927,6 +22974,8 @@ class CCHandler(BaseHTTPRequestHandler):
             if not srt_p:
                 return self._json({"error": "missing path"}, 400)
             srt_file = Path(srt_p).expanduser()
+            if not _is_path_allowed(srt_file):
+                return self._json({"error": "access denied"}, 403)
             if not srt_file.is_file():
                 return self._json({"error": "not found"}, 404)
             srt_text = srt_file.read_text(encoding="utf-8", errors="replace")
@@ -22949,6 +22998,8 @@ class CCHandler(BaseHTTPRequestHandler):
             p = Path(fpath).expanduser()
             if not p.is_absolute():
                 return self._json({"error": "absolute path required"}, 400)
+            if not _is_path_allowed(p):
+                return self._json({"error": "access denied"}, 403)
             WRITABLE_EXTS = {".md", ".markdown", ".mdx", ".txt", ".json",
                              ".yml", ".yaml", ".toml", ".ini", ".cfg",
                              ".sh", ".py", ".js", ".ts", ".css", ".html", ".htm"}
@@ -22971,6 +23022,8 @@ class CCHandler(BaseHTTPRequestHandler):
                 p = Path(cwd).expanduser() / p
             elif not p.is_absolute():
                 return self._json({"error": "relative path without cwd"}, 400)
+            if not _is_path_allowed(p):
+                return self._json({"error": "access denied"}, 403)
             if not p.is_file():
                 return self._json({"error": "file not found"}, 404)
             try:
@@ -23048,6 +23101,8 @@ class CCHandler(BaseHTTPRequestHandler):
                 p = Path(cwd).expanduser() / p
             elif not p.is_absolute():
                 return self._json({"error": "relative path without cwd"}, 400)
+            if not _is_path_allowed(p):
+                return self._json({"error": "access denied"}, 403)
             if not p.is_file():
                 return self._json({"error": "file not found"}, 404)
             ext = p.suffix.lower()
@@ -23097,6 +23152,8 @@ class CCHandler(BaseHTTPRequestHandler):
             if not query:
                 return self._json([])
             p = Path(query).expanduser()
+            if not _is_path_allowed(p):
+                return self._json([])
             # If query ends with /, list contents of that dir
             if query.endswith("/") and p.is_dir():
                 parent = p
@@ -23110,6 +23167,8 @@ class CCHandler(BaseHTTPRequestHandler):
                 results = []
                 for item in sorted(parent.iterdir()):
                     if item.name.startswith("."):
+                        continue
+                    if not _is_path_allowed(item):
                         continue
                     if item.is_dir() and item.name.lower().startswith(prefix):
                         results.append(str(item) + "/")
@@ -23146,6 +23205,8 @@ class CCHandler(BaseHTTPRequestHandler):
                 return self._json({"error": "missing path"}, 400)
             show_hidden = qs.get("hidden", ["0"])[0] == "1"
             p = Path(ls_path).expanduser().resolve()
+            if not _is_path_allowed(p):
+                return self._json({"error": "access denied"}, 403)
             if not p.is_dir():
                 return self._json({"error": "not a directory"}, 400)
             try:
@@ -23193,6 +23254,8 @@ class CCHandler(BaseHTTPRequestHandler):
             if not target_dir:
                 return self._json({"error": "missing 'dir' field"}, 400)
             dest_dir = Path(target_dir).expanduser().resolve()
+            if not _is_path_allowed(dest_dir):
+                return self._json({"error": "access denied"}, 403)
             if not dest_dir.is_dir():
                 return self._json({"error": f"not a directory: {target_dir}"}, 400)
             saved = []
