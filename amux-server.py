@@ -137,6 +137,21 @@ def _is_path_allowed(p: Path) -> bool:
     except ValueError:
         pass  # outside home — allow (e.g. /tmp, project dirs)
     return True
+
+def _safe_note_path(note_rel: str, base: Path = None) -> Path | None:
+    """Resolve a note relative path and verify it stays within the notes directory.
+    Returns the resolved Path if safe, or None if traversal detected."""
+    if base is None:
+        base = CC_NOTES
+    if not note_rel or note_rel.startswith("/"):
+        return None
+    candidate = (base / note_rel).resolve()
+    try:
+        candidate.relative_to(base.resolve())
+    except ValueError:
+        return None  # traversal detected
+    return candidate
+
 CC_LOGS.mkdir(parents=True, exist_ok=True)
 CC_MEMORY.mkdir(parents=True, exist_ok=True)
 CC_BOARD_DIR.mkdir(parents=True, exist_ok=True)
@@ -22374,11 +22389,11 @@ class CCHandler(BaseHTTPRequestHandler):
 
             if method == "GET" and action.startswith("note/") and "notes" in perms:
                 note_rel = action[len("note/"):]
-                if ".." in note_rel or note_rel.startswith("/"):
-                    return self._json({"error": "invalid path"}, 400)
                 if not note_rel.endswith(".md"):
                     note_rel += ".md"
-                note_path = CC_NOTES / note_rel
+                note_path = _safe_note_path(note_rel)
+                if not note_path:
+                    return self._json({"error": "invalid path"}, 400)
                 if note_path.exists():
                     return self._json({"content": note_path.read_text(errors="replace"), "path": note_rel})
                 return self._json({"error": "not found"}, 404)
@@ -22681,9 +22696,9 @@ class CCHandler(BaseHTTPRequestHandler):
 
         if method == "POST" and path.startswith("/api/notes/trash/") and path.endswith("/restore"):
             fname = path[len("/api/notes/trash/"):-len("/restore")]
-            if ".." in fname or "/" in fname:
+            src = _safe_note_path(fname, CC_NOTES / ".trash")
+            if not src:
                 return self._json({"error": "invalid"}, 400)
-            src = CC_NOTES / ".trash" / fname
             if not src.exists():
                 return self._json({"error": "not found"}, 404)
             dst = CC_NOTES / fname
@@ -22697,19 +22712,19 @@ class CCHandler(BaseHTTPRequestHandler):
 
         if method == "DELETE" and path.startswith("/api/notes/trash/"):
             fname = path[len("/api/notes/trash/"):]
-            if ".." in fname or "/" in fname:
+            f = _safe_note_path(fname, CC_NOTES / ".trash")
+            if not f:
                 return self._json({"error": "invalid"}, 400)
-            f = CC_NOTES / ".trash" / fname
             if f.exists(): f.unlink()
             return self._json({"ok": True})
 
         if path.startswith("/api/notes/"):
             note_rel = path[len("/api/notes/"):]
-            if ".." in note_rel or note_rel.startswith("/"):
-                return self._json({"error": "invalid path"}, 400)
             if not note_rel.endswith(".md"):
                 note_rel += ".md"
-            note_path = CC_NOTES / note_rel
+            note_path = _safe_note_path(note_rel)
+            if not note_path:
+                return self._json({"error": "invalid path"}, 400)
             if method == "GET":
                 if note_path.exists():
                     return self._json({"content": note_path.read_text(errors="replace"), "path": note_rel})
@@ -22725,11 +22740,11 @@ class CCHandler(BaseHTTPRequestHandler):
             if method == "PATCH":
                 body = self._read_body()
                 new_rel = body.get("move_to", "").strip()
-                if not new_rel or ".." in new_rel:
-                    return self._json({"error": "invalid"}, 400)
                 if not new_rel.endswith(".md"):
                     new_rel += ".md"
-                new_path = CC_NOTES / new_rel
+                new_path = _safe_note_path(new_rel)
+                if not new_path:
+                    return self._json({"error": "invalid"}, 400)
                 if new_path != note_path and note_path.exists():
                     new_path.parent.mkdir(parents=True, exist_ok=True)
                     note_path.rename(new_path)
