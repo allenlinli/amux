@@ -1416,9 +1416,11 @@ def _init_claude_config():
         claude_json.write_text(_json.dumps(cfg, indent=2))
 
     # ── ~/.claude/settings.json — yolo mode + auto-accept ────────────────────
-    # skipDangerousModePermissionPrompt: skip the "enter dangerous mode?" prompt
-    # when --dangerously-skip-permissions is passed (yolo mode).
-    # Permissions allow list matches what --dangerously-skip-permissions grants.
+    # Only enable dangerous mode when explicitly opted in via AMUX_DANGEROUS_MODE=1.
+    # This grants skipDangerousModePermissionPrompt and broad tool permissions
+    # so sessions never get blocked on permission prompts.
+    if not os.environ.get("AMUX_DANGEROUS_MODE"):
+        return
     settings_file = _pathlib.Path.home() / ".claude" / "settings.json"
     settings_file.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -1429,9 +1431,6 @@ def _init_claude_config():
     if not settings.get("skipDangerousModePermissionPrompt"):
         settings["skipDangerousModePermissionPrompt"] = True
         settings_changed = True
-    # Allow all tools so sessions never get blocked on permission prompts.
-    # --dangerously-skip-permissions is rejected as root (Claude v2.1.69+),
-    # so we grant permissions via settings.json instead.
     perms = settings.setdefault("permissions", {})
     allow = perms.setdefault("allow", [])
     for tool in ["Bash(*)", "Edit(*)", "Write(*)", "MultiEdit(*)", "NotebookEdit(*)"]:
