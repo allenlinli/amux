@@ -66,91 +66,24 @@ CC_TRANSCRIPTS = CC_HOME / "transcripts"  # per-session JSONL backups
 CC_GMAIL = CC_HOME / "gmail-tokens"        # per-account Gmail OAuth tokens
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
-# ── Authentication ───────────────────────────────────────────────────────────
-# Auto-generated bearer token stored in ~/.amux/auth_token.
-# Set AMUX_AUTH_TOKEN env var to override. Set to "none" to disable auth.
-_AUTH_TOKEN_FILE = _amux_home / "auth_token"
-def _load_or_create_auth_token() -> str:
-    env_token = os.environ.get("AMUX_AUTH_TOKEN", "")
-    if env_token:
-        return "" if env_token.lower() == "none" else env_token
-    if _AUTH_TOKEN_FILE.exists():
-        token = _AUTH_TOKEN_FILE.read_text().strip()
-        if token:
-            return token
-    import secrets as _secrets
-    token = _secrets.token_urlsafe(32)
-    _amux_home.mkdir(parents=True, exist_ok=True)
-    _AUTH_TOKEN_FILE.write_text(token + "\n")
-    os.chmod(str(_AUTH_TOKEN_FILE), 0o600)
-    return token
-
-AUTH_TOKEN = _load_or_create_auth_token()
-
-# Paths that don't require auth (public assets, share links, health check)
-_PUBLIC_PATHS = frozenset({"/", "/manifest.json", "/sw.js", "/icon.svg", "/icon.png",
-                           "/icon-192.png", "/icon-512.png", "/release-notes",
-                           "/api/release-notes"})
-_PUBLIC_PREFIXES = ("/s/", "/api/share/", "/invite/")
-
-# ── Filesystem access control ────────────────────────────────────────────────
-# Sensitive paths that must never be served via file APIs
-_SENSITIVE_PATHS = {".ssh", ".gnupg", ".aws", ".kube", ".netrc", ".npmrc",
-                    ".docker", ".config/gcloud", ".config/gh"}
-
-# System paths blocked regardless of location
-_BLOCKED_SYSTEM_PATHS = frozenset({
-    "/etc/shadow", "/etc/sudoers", "/etc/master.passwd",
-    "/private/etc/shadow", "/private/etc/sudoers",
-    "/var/db/sudo", "/private/var/db/sudo",
-})
-_BLOCKED_SYSTEM_PREFIXES = (
-    "/etc/ssh/", "/private/etc/ssh/",
-    "/var/run/secrets/", "/run/secrets/",
+# ── Security (imported from security.py) ─────────────────────────────────────
+from security import (
+    load_or_create_auth_token, check_auth,
+    is_path_allowed, safe_note_path,
+    is_origin_allowed, validate_tmux_key,
+    PUBLIC_PATHS, PUBLIC_PREFIXES, AUTH_REQUIRED_PATHS,
+    ALLOWED_TMUX_KEYS, MAX_BODY_SIZE,
 )
 
+_AUTH_TOKEN_FILE = _amux_home / "auth_token"
+AUTH_TOKEN = load_or_create_auth_token(_AUTH_TOKEN_FILE, _amux_home)
+
+# Thin wrappers that bind module-level state for call-site compatibility
 def _is_path_allowed(p: Path) -> bool:
-    """Check if a resolved path is safe to access via file APIs.
-    Blocks access to sensitive dotfile directories and system paths."""
-    try:
-        resolved = p.resolve()
-    except (OSError, ValueError):
-        return False
-    resolved_str = str(resolved)
-    # Block known sensitive system files
-    if resolved_str in _BLOCKED_SYSTEM_PATHS:
-        return False
-    if any(resolved_str.startswith(pfx) for pfx in _BLOCKED_SYSTEM_PREFIXES):
-        return False
-    # Block reading the auth token file itself
-    if resolved == _AUTH_TOKEN_FILE.resolve():
-        return False
-    # Check home-relative sensitive paths
-    home = Path.home().resolve()
-    try:
-        rel = resolved.relative_to(home)
-        parts = rel.parts
-        for sensitive in _SENSITIVE_PATHS:
-            sens_parts = Path(sensitive).parts
-            if parts[:len(sens_parts)] == sens_parts:
-                return False
-    except ValueError:
-        pass  # outside home — allow (e.g. /tmp, project dirs)
-    return True
+    return is_path_allowed(p, _AUTH_TOKEN_FILE)
 
 def _safe_note_path(note_rel: str, base: Path = None) -> Path | None:
-    """Resolve a note relative path and verify it stays within the notes directory.
-    Returns the resolved Path if safe, or None if traversal detected."""
-    if base is None:
-        base = CC_NOTES
-    if not note_rel or note_rel.startswith("/"):
-        return None
-    candidate = (base / note_rel).resolve()
-    try:
-        candidate.relative_to(base.resolve())
-    except ValueError:
-        return None  # traversal detected
-    return candidate
+    return safe_note_path(note_rel, base if base is not None else CC_NOTES)
 
 CC_LOGS.mkdir(parents=True, exist_ok=True)
 CC_MEMORY.mkdir(parents=True, exist_ok=True)
@@ -4055,23 +3988,12 @@ def send_text(name: str, text: str) -> tuple[bool, str]:
             return False, "timeout sending text"
 
 
-# Allowed tmux key names for send_keys (control sequences, not arbitrary text)
-_ALLOWED_TMUX_KEYS = frozenset({
-    "Enter", "Escape", "Tab", "BTab", "Space", "BSpace",
-    "Up", "Down", "Left", "Right", "Home", "End",
-    "PageUp", "PageDown", "IC", "DC",  # Insert, Delete
-    "C-c", "C-d", "C-z", "C-l", "C-a", "C-e", "C-k", "C-u",
-    "C-r", "C-p", "C-n", "C-b", "C-f", "C-w",
-    "M-b", "M-f", "M-d",  # Alt/Meta combos
-    "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
-    "y", "n", "q",  # common single-char confirmations
-})
-
 def send_keys(name: str, keys: str) -> tuple[bool, str]:
     if not is_running(name):
         return False, "not running"
-    if keys not in _ALLOWED_TMUX_KEYS:
-        return False, f"key '{keys}' not in allowed set"
+    ok, msg = validate_tmux_key(keys)
+    if not ok:
+        return False, msg
     lock = _get_send_lock(name)
     with lock:
         try:
@@ -21788,14 +21710,7 @@ class CCHandler(BaseHTTPRequestHandler):
     def _cors(self):
         origin = self.headers.get("Origin", "")
         if origin:
-            from urllib.parse import urlparse as _up
-            parsed = _up(origin)
-            host = parsed.hostname or ""
-            # Allow same-machine origins (localhost, LAN IP, Tailscale hostname)
-            allowed = host in ("localhost", "127.0.0.1", "0.0.0.0") or \
-                      host == get_lan_ip() or \
-                      host.endswith(".ts.net")
-            if allowed:
+            if is_origin_allowed(origin, get_lan_ip()):
                 self.send_header("Access-Control-Allow-Origin", origin)
                 self.send_header("Vary", "Origin")
             # Else: no ACAO header → browser blocks the request
@@ -22098,7 +22013,7 @@ class CCHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
 
-    _MAX_BODY_SIZE = 10 * 1024 * 1024  # 10 MB
+    _MAX_BODY_SIZE = MAX_BODY_SIZE
 
     def _read_body(self) -> dict:
         length = int(self.headers.get("Content-Length", 0))
@@ -22144,23 +22059,8 @@ class CCHandler(BaseHTTPRequestHandler):
 
     def _check_auth(self, method: str, path: str) -> bool:
         """Return True if request is authorized. Sends 401 and returns False if not."""
-        if not AUTH_TOKEN:
-            return True  # auth disabled
-        if path in _PUBLIC_PATHS or any(path.startswith(p) for p in _PUBLIC_PREFIXES):
-            return True
-        # Static assets (CSS/JS/images served from /)
-        # Exclude sensitive non-API paths that need auth
-        _AUTH_REQUIRED_PATHS = frozenset({"/ca"})
-        if method == "GET" and not path.startswith("/api/") and not path.startswith("/proxy/") \
-                and path not in _AUTH_REQUIRED_PATHS:
-            return True
-        # Check Authorization header
-        auth = self.headers.get("Authorization", "")
-        if auth == f"Bearer {AUTH_TOKEN}":
-            return True
-        # Check query param fallback (for EventSource/SSE which can't set headers)
-        token_qs = parse_qs(urlparse(self.path).query).get("_token", [""])[0]
-        if token_qs == AUTH_TOKEN:
+        auth_header = self.headers.get("Authorization", "")
+        if check_auth(AUTH_TOKEN, method, path, auth_header, self.path):
             return True
         self.send_response(401)
         self.send_header("Content-Type", "application/json")
