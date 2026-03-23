@@ -89,7 +89,7 @@ AUTH_TOKEN = _load_or_create_auth_token()
 
 # Paths that don't require auth (public assets, share links, health check)
 _PUBLIC_PATHS = frozenset({"/", "/manifest.json", "/sw.js", "/icon.svg", "/icon.png",
-                           "/icon-192.png", "/icon-512.png", "/ca", "/release-notes",
+                           "/icon-192.png", "/icon-512.png", "/release-notes",
                            "/api/release-notes"})
 _PUBLIC_PREFIXES = ("/s/", "/api/share/", "/invite/")
 
@@ -25907,7 +25907,7 @@ def main():
             from http.server import HTTPServer, BaseHTTPRequestHandler
             class H(BaseHTTPRequestHandler):
                 def do_GET(self):
-                    # Serve any .crt/.pem file in TLS_DIR by name, plus /api/cert legacy path
+                    # Serve only public certificate files (never private keys)
                     import urllib.parse
                     req = urllib.parse.unquote(self.path.split("?")[0]).lstrip("/")
                     served = None
@@ -25916,10 +25916,14 @@ def main():
                         if p.exists():
                             served = (p, "application/x-pem-file", "amux.pem")
                     elif req and (req.endswith(".crt") or req.endswith(".pem")):
-                        p = TLS_DIR / req
-                        if p.exists():
-                            fname = p.name
-                            served = (p, "application/x-x509-ca-cert", fname)
+                        # Block private key files
+                        if "key" in req.lower() or ".." in req or "/" in req:
+                            served = None
+                        else:
+                            p = TLS_DIR / Path(req).name  # strip any path components
+                            if p.exists() and "key" not in p.name.lower():
+                                fname = p.name
+                                served = (p, "application/x-x509-ca-cert", fname)
                     if served:
                         p, ctype, fname = served
                         body = p.read_bytes()
